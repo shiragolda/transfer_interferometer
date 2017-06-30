@@ -1,43 +1,49 @@
 /*
-  PID control for transfer lock cavity / interferometer
-  Use output pin 0 for cavity/interferometer piezo
+  PID control for transfer interferometer
+  Use output pin 0 for interferometer piezo
  */
 
 #include <analogShield.h>
 #include <SPI.h>  //required for ChipKIT but does not affect Arduino
 
-/* Number of channels to lock */
-int n = 2;
+typedef struct {
+  String param_name;
+  float param_value;
+} GlobalParameter ;
 
-/* Input Initial PID Control Parameters */
-float p_term[3] = {0.7,0.01,0.1};   // proportional gain terms
-float i_time[3] = {100000,50000,500000};    // integration time constant in microseconds
-float alpha[3] = {0.4,0.4,0.4};  // low pass filter constant
+typedef struct {
+  String param_name;
+  float param_value[3];
+} ChannelParameter ;
+
+/* Number of channels to lock */
+GlobalParameter channels {"Number of channels to lock",1};
+int n = channels.param_value;
 
 /* Adjust Initial Ramp Parameters */
-float freq = 97.5; //in Hz
-float amp = 4; // in V
+GlobalParameter freq = {"Scan Frequency [Hz]",97.5}; //in Hz
+float period = 1000000/freq.param_value; //in micros
+GlobalParameter amp = {"Scan Amplitude [V]",4}; // in V
 
-long fringe_separation[3] = {3000,1320,0}; //in micros
-float threshhold[3] = {0.005,0.002,0.005};
 
+/* Input Initial PID Control Parameters */
+ChannelParameter p_term = {"Proportional gain",{0.7,0.01,0.1}};   // proportional gain terms
+ChannelParameter i_time = {"Integration time [us]",{100000,50000,500000}};    // integration time constant in microseconds
+ChannelParameter alpha = {"Low-pass filter constant",{0.4,0.4,0.4}};  // low pass filter constant
+
+/* Measured Values: */
+ChannelParameter fringe_separation = {"Fringe period [us]",{3000,1320,0}}; //in micros
 
 /* Global variables */
-float period = 1000000/freq; //in micros
 unsigned long current_time; // time since program begun
 unsigned long ramp_time; // time since ramp started
 long time_at_ramp_reset = 0;
 
 int lock_state = 0;  // 0 is scanning, 1 is locked
 
-float sig_amp[3];
-float max_sig_in[3];
-float min_sig_in[3];
-
 const int s = 4;
 
 float lock_point[3];
-
 float set_point[3] = {0,0,0};
 float error[3];
 float accumulator[3] = {0,0,0};
@@ -56,28 +62,30 @@ void setup() {
  Serial.println("Set line-ending to Newline");
  Serial.println("Number of channels to lock: " + String(n) + " - to change, type [n]");
  Serial.println("To toggle between scan/lock, type [y]."); 
- Serial.println("Scan amplitude: " + String(amp,4) + " - to change, type [a]."); 
- Serial.println("Proportional gains: " + String(p_term[0],3) + ", " + String(p_term[1],3) + ", " + String(p_term[2],3) + " - to change, type [p].");
- Serial.println("Integral gain times: " + String(i_time[0]/1000,4) + ", " + String(i_time[1]/1000,2) + ", " + String(i_time[2]/1000,2) + " ms - to change, type [i].");
- Serial.println("Low-pass filter constant alpha: " + String(alpha[0],4) + ", " + String(alpha[1],2) + ", " + String(alpha[2],2) + " - to change, type [l].");
+ Serial.println("");
+ Serial.println("Scan amplitude: " + String(amp.param_value,4) + " - to change, type [a]."); 
+ Serial.println("Scan frequency: " + String(freq.param_value,4) + " - to change, type [f]."); 
+ Serial.println("Proportional gains: " + String(p_term.param_value[0],3) + ", " + String(p_term.param_value[1],3) + ", " + String(p_term.param_value[2],3) + " - to change, type [p].");
+ Serial.println("Integral gain times: " + String(i_time.param_value[0],4) + ", " + String(i_time.param_value[1],2) + ", " + String(i_time.param_value[2],2) + " us - to change, type [i].");
+ Serial.println("Low-pass filter constant alpha: " + String(alpha.param_value[0],4) + ", " + String(alpha.param_value[1],2) + ", " + String(alpha.param_value[2],2) + " - to change, type [l].");
+ Serial.println("");
  Serial.println("scanning mode");
 
  analog.write(zerov,zerov,zerov,zerov,true);
 }
 
 float toVoltage(float bits) {
-  return (bits-32768)/6553.6;
+  return (bits-32768)/6553.6; // Convert a number of bits 0<b<65536 to a voltage -5V<V<5V 
 }
 
 float toBits(float voltage) {
-  return voltage*6553.6+32768;
+  return voltage*6553.6+32768; // Convert a voltage -5V<V<5V to a number of bits 0<b<65536
 }
 
 /* Accept a serial input - float */
 float floatIn() {
   while(!Serial.available()){} //Wait for a serial input
-  if(Serial.available()) //Throw away the newline
-    Serial.read();
+  if(Serial.available()){Serial.read();} //Throw away the newline  
   while(!Serial.available()){} //Wait again
   return Serial.parseFloat(); //parse the next float
 }
@@ -85,15 +93,40 @@ float floatIn() {
 /* Accept a serial input - integer */
 int intIn() {
   while(!Serial.available()){} //Wait for a serial input
-  if(Serial.available()) //Throw away the newline
-    Serial.read();
+  if(Serial.available()){Serial.read();} //Throw away the newline
   while(!Serial.available()){} //Wait again
   return Serial.parseInt(); //parse the next int
 }
 
+GlobalParameter UpdateGlobalParameter(GlobalParameter param) {
+  Serial.print(param.param_name + " = ");
+  Serial.print(param.param_value,4);
+  Serial.println(" - enter a new value for " + param.param_name + ":");
+  float new_value = floatIn();
+  Serial.print(param.param_name + " = ");
+  Serial.println(new_value,4);
+  GlobalParameter new_param = {param.param_name,new_value};
+  return new_param;
+}
+
+ChannelParameter UpdateChannelParameter(ChannelParameter param) {
+  Serial.println("Pick a channel (0 = cavity, 1 = 423 laser ,2 = 453 laser)");
+  int channel = intIn();
+  Serial.print(param.param_name + " = ");
+  Serial.print(param.param_value[channel],4);
+  Serial.println(" - Enter a new value for " + param.param_name + ":");
+  float new_value = floatIn();
+  Serial.print(param.param_name + " = ");
+  Serial.println(new_value,4);
+  ChannelParameter new_param = param;
+  if(channel == 0 || channel == 1 || channel == 2)
+    new_param.param_value[channel] = new_value;
+  return new_param;
+}
+
+
 float getOffset() {
   float offset = toVoltage(analog.read(3));
-  // Do not send more than 2.5 volts to the piezo driver! (Gain is 48)
   offset = (offset/3.3)+0.5; //scales 0-5V down to 0.5 - 2 V (allows for +-0.5 mV servo voltage to be added safely)
   return offset;
 }
@@ -103,9 +136,9 @@ float getOffset() {
 float rampOut() {
   float ramp;
   if(ramp_time<=(period/2))
-    ramp = (amp/(period/2))*ramp_time;
+    ramp = (amp.param_value/(period/2))*ramp_time;
   else 
-    ramp = -(amp/(period/2))*ramp_time + 2*amp;
+    ramp = -(amp.param_value/(period/2))*ramp_time + 2*amp.param_value;
   return ramp;
 }
 
@@ -140,6 +173,7 @@ void scanMode() {
   } while(ramp_time<period);
 }
 
+
 // integers "detectLockPoint" and "getPI" toggle those parts of the code
 void lockMode(int getPI) {
   float sig_in[3];
@@ -169,14 +203,14 @@ void lockMode(int getPI) {
       // calculate derivative
       slope[i] = rollingDerivative(i,s,storage_array,sig_in[i]);
              
-      // wait to store s values for slope averaring, find first peak
-      if(count>s && ramp_time<fringe_separation[i] && abs(slope[i])<smallest_slope[i]) {
+      // wait to store s values for slope averaging, find first peak
+      if(count>s && ramp_time<fringe_separation.param_value[i] && abs(slope[i])<smallest_slope[i]) {
         smallest_slope[i] = slope[i];
         start_time[i] = ramp_time;
       }
       
       // find first rising zero crossing (steepest positive slope) after the first peak has passed
-      if(ramp_time>start_time[i] && ramp_time < fringe_separation[i]+start_time[i] && slope[i] > max_slope[i]){
+      if(ramp_time>start_time[i] && ramp_time < fringe_separation.param_value[i]+start_time[i] && slope[i] > max_slope[i]){
         max_slope[i] = slope[i];
         max_slope_time[i] = ramp_time;
       }
@@ -190,9 +224,9 @@ void lockMode(int getPI) {
     if(getPI == 1) { //note: increasing piezo voltage moves peaks to the left
       error[i] = 0.001*(lock_point[i]-set_point[i]); //Scale down because error is in microseconds - big number!
       accumulator[i] += error[i];  // accumulator is sum of errors 
-      float p = p_term[i]*error[i];
-      p = (alpha[i]*p_prime[i])+(1-alpha[i])*p;
-      pi_out[i] = (p+(p_term[i]*(1/i_time[i])*accumulator[i]*period));
+      float p = p_term.param_value[i]*error[i];
+      p = (alpha.param_value[i]*p_prime[i])+(1-alpha.param_value[i])*p;
+      pi_out[i] = (p+(p_term.param_value[i]*(1/i_time.param_value[i])*accumulator[i]*period));
       //Limit output voltage to -0.5V < Vout < 0.5V */
       if(pi_out[i]>=0.5)
         pi_out[i] = 0.5;
@@ -204,78 +238,22 @@ void lockMode(int getPI) {
 }
 
 
+
+
 void loop() {
-  
+ 
   // Listen for serial input
   byte byte_read = Serial.read();
-
-  if(byte_read == 'n') {
-    Serial.println("Number of channels to lock = " + String(n) + " enter a new number of channels:");
-    int num = intIn();
-    if(num == 1 || num == 2 || num == 3 || num == 4)
-      n = num;
-    Serial.print("Number of channels to lock ");
-    Serial.println(n);
-  }
-
-  if(byte_read == 'a') {
-    Serial.println("Scan amplitude = " + String(amp) + " V - enter a new value for amplitude:");
-    amp = floatIn();
-    Serial.print("Amplitude set to [V]: ");
-    Serial.println(amp);
-  }
-
-  if(byte_read == 'f') {
-    Serial.println("Scan frequency = " + String(freq) + " Hz - enter a new value for frequency:");
-    freq = floatIn();
-    period = 1000000/freq;
-    Serial.print("Frequency set to [Hz]: ");
-    Serial.println(freq);
-  }
-
-  if(byte_read == 'p') {
-    Serial.println("Pick a channel (0 = cavity, 1 = 423 laser ,2 = 453 laser)");
-    int channel = intIn();
-    Serial.print("p = ");
-    Serial.print(p_term[channel],5);
-    Serial.println(" Enter a new value for p:");
-    float p = floatIn();
-    if(channel == 0 || channel == 1 || channel == 2)
-      p_term[channel] = p;
-    Serial.print("p on channel " + String(channel) + " set to ");
-    Serial.println(p_term[channel],5);
-  }
-
-  if(byte_read == 'i') {
-    Serial.println("Pick a channel (0 = cavity, 1 = 423 laser ,2 = 453 laser)");
-    int channel = intIn();
-    Serial.println("i = " + String(i_time[channel]/1000,2) + " ms - enter a new value for I:");
-    float i = floatIn();
-    if(channel == 0 || channel == 1 || channel == 2)
-      i_time[channel] = i*1000;
-    Serial.println("i on channel " + String(channel) + " set to " + String(i_time[channel]/1000.,2) + " ms");
-  }
-
-  if(byte_read == 'l') {
-    Serial.println("Pick a channel (0 = cavity, 1 = 423 laser ,2 = 453 laser)");
-    int channel = intIn();
-    Serial.println("alpha = " + String(alpha[channel]) + " Enter a new value for alpha:");
-    float a = floatIn();
-    if(channel == 0 || channel == 1 || channel == 2)
-      alpha[channel] = a;
-    Serial.println("alpha on channel " +String(channel) + " set to " + String(alpha[channel]));
-  }
-
-    if(byte_read == 't') {
-    Serial.println("Pick a channel (0 = cavity, 1 = 423 laser ,2 = 453 laser)");
-    int channel = intIn();
-    Serial.println("threshhold = " + String(threshhold[channel],5) + " Enter a new value for threshhold:");
-    float t = floatIn();
-    if(channel == 0 || channel == 1 || channel == 2)
-      threshhold[channel] = t;
-    Serial.println("threshhold on channel " +String(channel) + " set to " + String(threshhold[channel],5));
-  }
-
+  if(byte_read == 'n') {channels = UpdateGlobalParameter(channels); }
+  if(byte_read == 'a') {amp = UpdateGlobalParameter(amp); }
+  if(byte_read == 'f') {freq = UpdateGlobalParameter(freq); }
+  if(byte_read == 'p') {p_term = UpdateChannelParameter(p_term); }
+  if(byte_read == 'i') {i_time = UpdateChannelParameter(i_time); }
+  if(byte_read == 'l') {alpha = UpdateChannelParameter(alpha); }
+  
+  
+  n = channels.param_value;
+  period = 1000000/freq.param_value; //in micros
 
   
   /* Listen for a scan/lock toggle command: */
@@ -321,7 +299,7 @@ void loop() {
 
 
     /*Write to serial for data logging */
-    if(loop_counter%200 == 0) {
+    if(loop_counter%400 == 0) {
       Serial.print(error[0],4);
       Serial.print(',');
       Serial.print(pi_out[0],4);
