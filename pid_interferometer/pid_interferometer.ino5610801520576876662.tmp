@@ -211,7 +211,7 @@ void lockMode(int getPI) {
 //  float max_slope[3] = {-100,-100,-100};
 //  long max_slope_time[3] = {0,0,0};
   
-  int count[3] = {0,0,0};
+  int count = 0;
   float sig_in[3];
   float freq[3];
   float mixed_sig_in[3];
@@ -236,13 +236,16 @@ void lockMode(int getPI) {
     analog.write(toBits(rampOut()+pi_out[0]),toBits(-1.0*pi_out[1]),toBits(pi_out[2]),toBits(pi_out[0]),true);
 
     for(int i=0;i<n;i++) {
-      if(ramp_time<fringe_separation.param_value[i]) {
+      if(ramp_time<fringe_separation[i]) {
         count[i] ++;
         // read signal
+  
+    
         sig_in[i] = toVoltage(analog.read(i));
         
-        //mixed_sig_in[i] = sig_in[i] * sin(2*pi*freq[i]*current_time);
-        mixed_sig_in[i] = sig_in[i] * lookup_sin(360*freq[i]*current_time); //factor of 2 faster
+        //SHIRA - SWITCH THIS SIN FUNCTION TO A LOOKUP TABLE!
+        mixed_sig_in[i] = sig_in[i] * sin(2*pi*freq[i]*current_time);
+        //mixed_sig_in[i] = sig_in[i] * lookup_sin(360*freq[i]*current_time);
         
         mixed_sig_sum[i] += mixed_sig_in[i];
   
@@ -268,21 +271,25 @@ void lockMode(int getPI) {
         //  max_slope[i] = slope[i];
         //  max_slope_time[i] = ramp_time;
         //}
-      }
     }
+  }
+
   } while(ramp_time<period);
   
   for(int i=0;i<n;i++) {
     amplitude[i] = max_sig[i] - min_sig[i];
     
-    mixed_sig_avg[i] = mixed_sig_sum[i]/count[i];
-
+    mixed_sig_avg[i] = mixed_sig_sum[i]/count;
+    Serial.println(mixed_sig_avg[i]);
+    Serial.println(2*mixed_sig_avg[i]/amplitude[i]);
     phase[i] = acos(2*mixed_sig_avg[i]/amplitude[i]); //returns value in [0,pi]
-
+    Serial.println(count);
+    Serial.println(phase[i]);
 
     //lock_point[i] = max_slope_time[i];
     lock_point[i] = phase[i]*(fringe_separation.param_value[i]/(2*pi));
-
+    Serial.println(lock_point[i]);
+    Serial.println("");
     
 
     if(getPI == 1) { //note: increasing piezo voltage moves peaks to the left
@@ -362,10 +369,11 @@ void loop() {
     loop_counter ++;
     lockMode(0); // detect lock point + calculate PI output for next iteration
 
+//    //Serial.println(lock_point[0]);
 //    /*Write to serial for data logging */
-    if(loop_counter%100 == 0) {
-      Serial.println(lock_point[0],4);
-      //Serial.println(millis());
+//    if(loop_counter%100 == 0) {
+//      Serial.println(lock_point[0],4);
+//      Serial.println(millis());
 
       
 //      Serial.println(error[0],4);
@@ -375,7 +383,7 @@ void loop() {
 //      Serial.print(error[1],4);
 //      Serial.print(',');
 //      Serial.println(pi_out[1],4);
-    } 
+//    } 
   }
 
 }
