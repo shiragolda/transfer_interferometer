@@ -17,18 +17,18 @@ typedef struct {
 } ChannelParameter ;
 
 /* Number of channels to lock */
-GlobalParameter channels {"Number of channels to lock",1};
+GlobalParameter channels {"Number of channels to lock",2};
 int n = channels.param_value;
 
 /* Adjust Initial Ramp Parameters */
 GlobalParameter freq = {"Scan Frequency [Hz]",97.5}; //in Hz
 float period = 1000000/freq.param_value; //in micros
-GlobalParameter amp = {"Scan Amplitude [V]",4}; // in V
+GlobalParameter amp = {"Scan Amplitude [V]",0.6}; // in V
 
 
 /* Input Initial PID Control Parameters */
-ChannelParameter p_term = {"Proportional gain",{0.7,0.01,0.1}};   // proportional gain terms
-ChannelParameter i_time = {"Integration time [us]",{100000,50000,500000}};    // integration time constant in microseconds
+ChannelParameter p_term = {"Proportional gain",{0.03,0.03,0.1}};   // proportional gain terms
+ChannelParameter i_time = {"Integration time [ms]",{1000,1000,500000}};    // integration time constant in microseconds
 ChannelParameter alpha = {"Low-pass filter constant",{0.4,0.4,0.4}};  // low pass filter constant
 
 /* Measured Values: */
@@ -43,12 +43,18 @@ int lock_state = 0;  // 0 is scanning, 1 is locked
 
 const int s = 4;
 
+float limit=2;
+
 float lock_point[3];
 float set_point[3] = {0,0,0};
 float error[3];
 float accumulator[3] = {0,0,0};
 float pi_out[3] = {0,0,0};
 float p_prime[3] = {0,0,0};
+
+float previous_min_sig[3];
+float amplitude[3];
+float sig_offset[3];
 
 unsigned long loop_counter = 0;
 
@@ -75,7 +81,7 @@ void setup() {
  Serial.println("Scan amplitude [V]: " + String(amp.param_value,4) + " - to change, type [a]."); 
  Serial.println("Scan frequency [Hz]: " + String(freq.param_value,4) + " - to change, type [f]."); 
  Serial.println("Proportional gains: " + String(p_term.param_value[0],3) + ", " + String(p_term.param_value[1],3) + ", " + String(p_term.param_value[2],3) + " - to change, type [p].");
- Serial.println("Integral gain times [us]: " + String(i_time.param_value[0],4) + ", " + String(i_time.param_value[1],2) + ", " + String(i_time.param_value[2],2) + " us - to change, type [i].");
+ Serial.println("Integral gain times [ms]: " + String(i_time.param_value[0],4) + ", " + String(i_time.param_value[1],2) + ", " + String(i_time.param_value[2],2) + " us - to change, type [i].");
  Serial.println("Low-pass filter constant alpha: " + String(alpha.param_value[0],4) + ", " + String(alpha.param_value[1],2) + ", " + String(alpha.param_value[2],2) + " - to change, type [l].");
  Serial.println("Measured fringe periodicity [us]: " + String(fringe_separation.param_value[0],4) + ", " + String(fringe_separation.param_value[1],2) + ", " + String(fringe_separation.param_value[2],2) + " - to change, type [s].");
  Serial.println("");
@@ -83,7 +89,7 @@ void setup() {
 
  analog.write(zerov,zerov,zerov,zerov,true);
 
- GenerateLookupTable();
+ //GenerateLookupTable();
 }
 
 float toVoltage(float bits) {
@@ -136,168 +142,110 @@ ChannelParameter UpdateChannelParameter(ChannelParameter param) {
   return new_param;
 }
 
-float lookup_sin(float f) {
-  long x = f; //rounds down
-  
-  if(x>=360) {x = x%360;} // wrap it to 0-360
-  long y = x%90; // wrap it again to 0-90
-  
-  if (x<90) {return sin_table[y];}
-  else if (x<180) {return sin_table[90-y];}
-  else if (x<270) {return -sin_table[y];}
-  else {return -sin_table[90-y];}
-}
-  
-
-float getOffset() {
-  float offset = toVoltage(analog.read(3));
-  offset = (offset/3.3)+0.5; //scales 0-5V down to 0.5 - 2 V (allows for +-0.5 mV servo voltage to be added safely)
-  return offset;
-}
-
-
-/* Generate triangle ramp from 0V to Amp */
+/* Generate triangle ramp with amplitude Amp and offset 2.5V */
 float rampOut() {
   float ramp;
   if(ramp_time<=(period/2))
-    ramp = (amp.param_value/(period/2))*ramp_time;
+    //ramp = (amp.param_value/(period/2))*ramp_time + (2.5-amp.param_value/2);
+    ramp = (2*amp.param_value)/(period)*ramp_time + (2.5-amp.param_value/2);
   else 
-    ramp = -(amp.param_value/(period/2))*ramp_time + 2*amp.param_value;
+    //ramp = -(amp.param_value/(period/2))*ramp_time + 2*amp.param_value + (2.5-amp.param_value/2);
+    ramp = (-2*amp.param_value)/(period)*ramp_time +(2.5+3*amp.param_value/2);
   return ramp;
 }
 
-/* Calculate rolling derivative of a signal */
-//NOTE: new values are stored at the BEGINNING of the array!
-//NOTE: produces nonsense until slice_count values have been added to the array
-float rollingDerivative(int i, int slice_count, float history_array[][s], float new_value) {
-  float left_sum = 0;
-  float right_sum = 0;
-  for(int j=slice_count-1;j>0;j--) {
-    history_array[i][j] = history_array[i][j-1];
-    if(j>=slice_count/2) {
-      right_sum += history_array[i][j];
-    }
-    if(j<slice_count/2) {
-      left_sum += history_array[i][j];
-    }
-  }
-  history_array[i][0] = new_value;
-  left_sum += history_array[i][0];
-  return((left_sum-right_sum)/(float)slice_count);
+float GetPIValue(int i) { //note: increasing piezo voltage moves peaks to the left
+    error[i] = 0.001*(lock_point[i]-set_point[i]); //Scale down because error is in microseconds - big number!
+    accumulator[i] += error[i];  // accumulator is sum of errors 
+    float p = p_term.param_value[i]*error[i];
+    p = (alpha.param_value[i]*p_prime[i])+(1-alpha.param_value[i])*p;
+    float pi = (p+(p_term.param_value[i]*(1/i_time.param_value[i])*accumulator[i]*(period/1000)));
+    //Limit output voltage to -limit V < Vout < limitV */
+    if(pi>=limit)
+      pi = limit;
+    if(pi<=-limit)
+      pi = -limit;
+    p_prime[i] = p;
+
+    return pi;
 }
 
 
 void scanMode() {
-  //float offset_voltage = getOffset();
   time_at_ramp_reset = micros(); 
   do {
     current_time = micros(); //time in mircoseconds
     ramp_time = current_time-time_at_ramp_reset;
-    analog.write(toBits(rampOut()),toBits(0),toBits(0),true);
+    analog.write(toBits(rampOut()),toBits(2.5),toBits(2.5),true);
   } while(ramp_time<period);
 }
 
-
-
-// integers "detectLockPoint" and "getPI" toggle those parts of the code
-void lockMode(int getPI) {
-
-//  float slope[3];
-//  float new_max_sig_in[3] = {-5,-5,-5};
-//  float new_min_sig_in[3] = {5,5,5};
-//  float smallest_slope[3] = {100,100,100};
-//  long start_time[3] = {-1,-1,-1};
-//  float storage_array[3][s];
-//  float max_slope[3] = {-100,-100,-100};
-//  long max_slope_time[3] = {0,0,0};
-  
-  int count[3] = {0,0,0};
+/* 
+ *  scans and reads in photodiode signal
+ *  calculates max,min,amplitude,offset
+ *  if detect_lock_point = 1: calculates lock point
+ */
+void analyzeSignal(int detect_lock_point) { 
+  int count = 0;
   float sig_in[3];
-  float freq[3];
-  float mixed_sig_in[3];
-  float mixed_sig_sum[3] = {0,0,0};
-  float mixed_sig_avg[3];
+  float previous_sig_in[3];
   float max_sig[3] = {-5,-5,-5};
   float min_sig[3] = {5,5,5};
-  float amplitude[3];
-  float phase[3];
+  int detect_flag[3] = {0,0,0};
+  int start_detect_flag[3] = {0,0,0};
 
-  for(int i=0;i<n;i++) {
-    freq[i] = 1/fringe_separation.param_value[i];
-  }
-
-  //float offset_voltage = getOffset();
   time_at_ramp_reset = micros();
   do {
     // write out ramp + pi calculated from previous iteration
-    
+    count ++;
     current_time = micros();
     ramp_time = current_time-time_at_ramp_reset;
-    analog.write(toBits(rampOut()+pi_out[0]),toBits(-1.0*pi_out[1]),toBits(pi_out[2]),toBits(pi_out[0]),true);
+    analog.write(toBits(rampOut()+pi_out[0]),toBits(2.5-1.0*pi_out[1]),toBits(2.5+pi_out[2]),true);
+    //analog.write(toBits(rampOut()),toBits(-1.0*pi_out[1]),toBits(pi_out[2]),true);
 
     for(int i=0;i<n;i++) {
-      if(ramp_time<fringe_separation.param_value[i]) {
-        count[i] ++;
-        // read signal
-        sig_in[i] = toVoltage(analog.read(i));
+      // read signal
+      sig_in[i] = toVoltage(analog.read(i));
+
+      if(sig_in[i] > max_sig[i]) {max_sig[i] = sig_in[i];}
+      if(sig_in[i] < min_sig[i]) {min_sig[i] = sig_in[i];}
+
+      if(detect_lock_point == 1) {
+        // find first minimum to trigger lock-point detection
+//        if(start_detect_flag[i]==0 && abs(sig_in[i]-previous_min_sig[i])<= 0.2*amplitude[i]) {
+//          start_detect_flag[i] = 1;
+//        }
         
-        //mixed_sig_in[i] = sig_in[i] * sin(2*pi*freq[i]*current_time);
-        mixed_sig_in[i] = sig_in[i] * lookup_sin(360*freq[i]*current_time); //factor of 2 faster
-        
-        mixed_sig_sum[i] += mixed_sig_in[i];
-  
-        if(sig_in[i] > max_sig[i]) {
-          max_sig[i] = sig_in[i];
+        // detect lock-point
+        if(count>1 && detect_flag[i] == 0 && previous_sig_in[i] <= sig_offset[i] && sig_in[i]>sig_offset[i]) {
+          lock_point[i] = ramp_time;
+          detect_flag[i] = 1;
         }
-  
-        if(sig_in[i] < min_sig[i]) {
-          min_sig[i] = sig_in[i];
-        }
-        
-        // calculate derivative
-        //slope[i] = rollingDerivative(i,s,storage_array,sig_in[i]);
-               
-        // wait to store s values for slope averaging, find first peak
-        //if(count>s && ramp_time<fringe_separation.param_value[i] && abs(slope[i])<smallest_slope[i]) {
-        //  smallest_slope[i] = slope[i];
-        //  start_time[i] = ramp_time;
-        //}
-        
-        // find first rising zero crossing (steepest positive slope) after the first peak has passed
-        //if(ramp_time>start_time[i] && ramp_time < fringe_separation.param_value[i]+start_time[i] && slope[i] > max_slope[i]){
-        //  max_slope[i] = slope[i];
-        //  max_slope_time[i] = ramp_time;
-        //}
       }
+      previous_sig_in[i] = sig_in[i];
     }
   } while(ramp_time<period);
-  
+
   for(int i=0;i<n;i++) {
     amplitude[i] = max_sig[i] - min_sig[i];
-    
-    mixed_sig_avg[i] = mixed_sig_sum[i]/count[i];
+    sig_offset[i] = (max_sig[i]+min_sig[i])/2;
+    previous_min_sig[i] = min_sig[i];
+  }
+//  Serial.print("Max: ");
+//  Serial.println(max_sig[0],4);
+//  Serial.print("Min: ");
+//  Serial.println(min_sig[0],4);
+//  Serial.print("Amplitude: ");
+//  Serial.println(amplitude[0],4);
+//  Serial.print("Lock point: ");
+//  Serial.println(lock_point[0],4);
+}
 
-    phase[i] = acos(2*mixed_sig_avg[i]/amplitude[i]); //returns value in [0,pi]
 
-
-    //lock_point[i] = max_slope_time[i];
-    lock_point[i] = phase[i]*(fringe_separation.param_value[i]/(2*pi));
-
-    
-
-    if(getPI == 1) { //note: increasing piezo voltage moves peaks to the left
-      error[i] = 0.001*(lock_point[i]-set_point[i]); //Scale down because error is in microseconds - big number!
-      accumulator[i] += error[i];  // accumulator is sum of errors 
-      float p = p_term.param_value[i]*error[i];
-      p = (alpha.param_value[i]*p_prime[i])+(1-alpha.param_value[i])*p;
-      pi_out[i] = (p+(p_term.param_value[i]*(1/i_time.param_value[i])*accumulator[i]*period));
-      //Limit output voltage to -0.5V < Vout < 0.5V */
-      if(pi_out[i]>=0.5)
-        pi_out[i] = 0.5;
-      if(pi_out[i]<=-0.5)
-        pi_out[i] = -0.5;
-      p_prime[i] = p;
-    }
+void lockMode() {
+  analyzeSignal(1);
+  for(int i=0;i<n;i++) {
+    pi_out[i] = GetPIValue(i);
   }
 }
 
@@ -325,13 +273,10 @@ void loop() {
   if(byte_read == 'y') {
     lock_state = !lock_state;
     
-    if(lock_state == 0)
+    if(lock_state == 0) {
       Serial.println("scanning mode");
-      for(int i=0;i<n;i++) {
-        accumulator[i] = 0;
-        pi_out[i] = 0;
-        p_prime[i] = 0;
-      }
+    }
+
     if(lock_state == 1) {
       Serial.println("locking mode");
       loop_counter = 0;
@@ -340,7 +285,8 @@ void loop() {
         pi_out[i] = 0;
         p_prime[i] = 0;
       }
-      lockMode(0); // detect lock-point - set peak time as PI setpoint
+      analyzeSignal(0); // detect signal params: max,min,amplitude,offset
+      analyzeSignal(1); // use signal params to detect lock-point
       for(int i=0;i<n;i++) {
         set_point[i] = lock_point[i];
         Serial.print("Set-point: ");
@@ -354,27 +300,28 @@ void loop() {
   
   /* Write output for scanning mode: */
   if(lock_state == 0) {
-   scanMode();
+    scanMode();
   }
 
   /* Write output for locking mode: */
   if(lock_state == 1) {
     loop_counter ++;
-    lockMode(0); // detect lock point + calculate PI output for next iteration
+    lockMode(); // detect lock point + calculate PI output for next iteration
 
-//    /*Write to serial for data logging */
-    if(loop_counter%100 == 0) {
-      Serial.println(lock_point[0],4);
-      //Serial.println(millis());
+    /* AUTORELOCK */
+    
 
-      
-//      Serial.println(error[0],4);
-//      Serial.print(',');
-//      Serial.print(pi_out[0],4);
-//      Serial.print(',');
-//      Serial.print(error[1],4);
-//      Serial.print(',');
-//      Serial.println(pi_out[1],4);
+
+
+    /*Write to serial for data logging */
+    if(loop_counter%500 == 0) {  
+      Serial.print(error[0],4); //ms
+      Serial.print(',');
+      Serial.print(pi_out[0],4); //V
+      Serial.print(',');
+      Serial.print(error[1],4); //ms
+      Serial.print(',');
+      Serial.println(pi_out[1],4); //V
     } 
   }
 
