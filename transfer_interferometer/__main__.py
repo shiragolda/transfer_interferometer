@@ -55,7 +55,7 @@ class zmq_pub_dict:
 publisher = zmq_pub_dict(args.publishport, "interferometer_error_signals")
 
 ser = serial.Serial()
-ser.port = 'COM12'
+ser.port = args.serialport
 ser.baudrate = 115200
 ser.timeout = 2
 ser.setDTR(False)
@@ -73,37 +73,41 @@ def commandListener():
 def get_error_signal():
     s = ser.readline()
     try:
-        error1,correction1,error2,correction2 = s.split(',')
+        error1,correction1,error2,correction2,error3,correction3 = s.split(',')
         error1 = float(error1)
         error2 = float(error2)
+        error3 = float(error3)
         correction1 = float(correction1)
         correction2 = float(correction2)
+        correction3 = float(correction3)
         msg = 'ok'
     except:
         error1 = 0
         error2 = 0
+        error3 = 0
         correction1 = 0
         correction2 = 0
+        correction3 = 0
         msg = s
-    
-    return error1,correction1,error2,correction2,msg
+
+    return error1,correction1,error2,correction2,error3,correction3,msg
 
 
 done = False
 while not done:
     try:
-        error1,correction1,error2,correction2,msg = get_error_signal();
-        
+        error1,correction1,error2,correction2,error3,correction3,msg = get_error_signal();
+
         if msg=='ok':
-            data_dict = {'interferometer_error': error1, 'interferometer_correction': correction1, '423_laser_error': error2, '423_laser_correction':       correction2}
+            data_dict = {'interferometer_error': error1, 'interferometer_correction': correction1, '423_laser_error': error2, '423_laser_correction': correction2,'453_laser_error': error3, '453_laser_correction': correction3}
 
             dt = str(time.time())
             publisher.send(data_dict)
-        
+
         elif msg!='':
             print msg
-            
-        
+
+
         if new_input:
             ser.write(kbd_input)
             new_input = False
